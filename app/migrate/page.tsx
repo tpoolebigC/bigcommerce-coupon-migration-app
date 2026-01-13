@@ -52,6 +52,99 @@ export default function MigratePage() {
     }
   }
 
+  const handleImportCodes = (importedCodes: Coupon[]) => {
+    setError('')
+    setCodes(importedCodes)
+    
+    // Create mock export data for compatibility
+    setExportData({
+      success: true,
+      data: importedCodes.map(coupon => ({
+        promotion: {
+          id: coupon.oldPromotionId || 0,
+          name: coupon.name || `Coupon: ${coupon.code}`,
+        },
+        codes: [{
+          code: coupon.code,
+          discount: coupon.discount || 10,
+        }],
+      })),
+      totalPromotions: importedCodes.length,
+      totalCoupons: importedCodes.length,
+    })
+    
+    setStep(2)
+  }
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      try {
+        const content = e.target?.result as string
+        const importedCodes = JSON.parse(content)
+        
+        if (!Array.isArray(importedCodes)) {
+          setError('Invalid file format. Expected a JSON array of coupon codes.')
+          return
+        }
+
+        // Validate and transform codes
+        const codes: Coupon[] = importedCodes.map((item: any) => ({
+          code: item.code || item.coupon_code || item,
+          discount: item.discount || 10,
+          oldPromotionId: item.oldPromotionId,
+          name: item.name || item.promotion_name,
+          max_uses: item.max_uses,
+        }))
+
+        if (codes.length === 0) {
+          setError('No valid codes found in file.')
+          return
+        }
+
+        handleImportCodes(codes)
+      } catch (error: any) {
+        setError(`Error parsing JSON file: ${error.message}`)
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  const handlePasteJSON = () => {
+    const jsonText = prompt('Paste your JSON codes array:')
+    if (!jsonText) return
+
+    try {
+      const importedCodes = JSON.parse(jsonText)
+      
+      if (!Array.isArray(importedCodes)) {
+        setError('Invalid format. Expected a JSON array of coupon codes.')
+        return
+      }
+
+      // Validate and transform codes
+      const codes: Coupon[] = importedCodes.map((item: any) => ({
+        code: item.code || item.coupon_code || item,
+        discount: item.discount || 10,
+        oldPromotionId: item.oldPromotionId,
+        name: item.name || item.promotion_name,
+        max_uses: item.max_uses,
+      }))
+
+      if (codes.length === 0) {
+        setError('No valid codes found.')
+        return
+      }
+
+      handleImportCodes(codes)
+    } catch (error: any) {
+      setError(`Error parsing JSON: ${error.message}`)
+    }
+  }
+
   const handleExport = async () => {
     setLoading(true)
     setError('')
@@ -396,50 +489,96 @@ export default function MigratePage() {
 
       {step === 1 && (
         <div className="card">
-          <h2>Step 1: Export Current Coupons</h2>
-          <p style={{ marginBottom: '1.5rem' }}>
-            First, let&apos;s create a backup of your existing coupons.
-          </p>
+          <h2>Step 1: Export or Import Coupons</h2>
           
-          {loading && progress.total > 0 && (
-            <div className="progress-container" style={{ marginBottom: '1.5rem' }}>
-              <div className="progress-bar">
-                <div className="progress-fill" style={{ width: `${Math.round((progress.processed / progress.total) * 100)}%` }}>
-                  {Math.round((progress.processed / progress.total) * 100)}%
+          <div style={{ marginBottom: '2rem', padding: '1rem', backgroundColor: '#f7fafc', borderRadius: '8px' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '1rem' }}>Option 1: Export from BigCommerce</h3>
+            <p style={{ marginBottom: '1rem', color: '#4a5568' }}>
+              Export your current coupons from BigCommerce to create a backup before migration.
+            </p>
+            
+            {loading && progress.total > 0 && (
+              <div className="progress-container" style={{ marginBottom: '1rem' }}>
+                <div className="progress-bar">
+                  <div className="progress-fill" style={{ width: `${Math.round((progress.processed / progress.total) * 100)}%` }}>
+                    {Math.round((progress.processed / progress.total) * 100)}%
+                  </div>
                 </div>
-              </div>
-              <div className="progress-text">
-                Processing: {progress.processed} of {progress.total} promotions
-              </div>
-              {progress.currentCode && (
-                <div style={{ textAlign: 'center', marginTop: '0.5rem', color: '#718096', fontSize: '0.875rem' }}>
-                  {progress.currentCode}
+                <div className="progress-text">
+                  Processing: {progress.processed} of {progress.total} promotions
                 </div>
-              )}
-            </div>
-          )}
+                {progress.currentCode && (
+                  <div style={{ textAlign: 'center', marginTop: '0.5rem', color: '#718096', fontSize: '0.875rem' }}>
+                    {progress.currentCode}
+                  </div>
+                )}
+              </div>
+            )}
 
-          <button onClick={handleExport} className="button" disabled={loading}>
-            {loading && <span className="loading"></span>}
-            {loading ? 'Exporting...' : 'Export Coupons'}
-          </button>
+            <button onClick={handleExport} className="button" disabled={loading}>
+              {loading && <span className="loading"></span>}
+              {loading ? 'Exporting...' : 'Export Coupons from BigCommerce'}
+            </button>
+          </div>
+
+          <div style={{ padding: '1rem', backgroundColor: '#f7fafc', borderRadius: '8px' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '1rem' }}>Option 2: Import Codes (Skip Export)</h3>
+            <p style={{ marginBottom: '1rem', color: '#4a5568' }}>
+              If you already have your codes exported or want to import from a file, you can skip the export step.
+            </p>
+            
+            <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              <label className="button button-secondary" style={{ cursor: 'pointer', margin: 0 }}>
+                📁 Upload JSON File
+                <input
+                  type="file"
+                  accept=".json,application/json"
+                  onChange={handleFileUpload}
+                  style={{ display: 'none' }}
+                />
+              </label>
+              
+              <button onClick={handlePasteJSON} className="button button-secondary">
+                📋 Paste JSON
+              </button>
+            </div>
+            
+            <div style={{ marginTop: '1rem', fontSize: '0.875rem', color: '#718096' }}>
+              <strong>Expected JSON format:</strong>
+              <pre style={{ marginTop: '0.5rem', padding: '0.75rem', backgroundColor: '#edf2f7', borderRadius: '4px', overflow: 'auto', fontSize: '0.75rem' }}>
+{`[
+  {
+    "code": "COUPON1",
+    "discount": 10,
+    "oldPromotionId": 123,
+    "name": "Promotion Name"
+  },
+  ...
+]`}
+              </pre>
+            </div>
+          </div>
         </div>
       )}
 
-      {step === 2 && exportData && (
+      {step === 2 && codes.length > 0 && (
         <div className="card">
           <h2>Step 2: Review Your Coupons</h2>
-          <div className="alert alert-success">
-            ✅ Exported {exportData.totalCoupons} coupon codes from {exportData.totalPromotions} promotions
-          </div>
-          <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-            <button onClick={downloadExportCSV} className="button button-secondary">
-              📊 Download CSV (Excel)
-            </button>
-            <button onClick={downloadExportJSON} className="button button-secondary">
-              📄 Download JSON (Backup)
-            </button>
-          </div>
+          {exportData && (
+            <div className="alert alert-success">
+              ✅ {exportData.totalCoupons ? `Exported ${exportData.totalCoupons} coupon codes from ${exportData.totalPromotions} promotions` : `Ready to migrate ${codes.length} coupon codes`}
+            </div>
+          )}
+          {exportData && exportData.data && (
+            <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+              <button onClick={downloadExportCSV} className="button button-secondary">
+                📊 Download CSV (Excel)
+              </button>
+              <button onClick={downloadExportJSON} className="button button-secondary">
+                📄 Download JSON (Backup)
+              </button>
+            </div>
+          )}
 
           <h3>Coupons to Migrate ({codes.length})</h3>
           <div style={{ maxHeight: '400px', overflowY: 'auto', marginBottom: '1.5rem' }}>
