@@ -112,7 +112,7 @@ async function createStandardCoupon(
 
 export async function POST(request: NextRequest) {
   try {
-    const { storeHash, accessToken, channelId, codes, startIndex = 0, batchSize = 50 } = await request.json()
+    const { storeHash, accessToken, channelId, codes } = await request.json()
 
     if (!storeHash || !accessToken || !codes || !Array.isArray(codes)) {
       return NextResponse.json(
@@ -121,23 +121,21 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const batch = codes.slice(startIndex, startIndex + batchSize)
+    // Process the codes array directly (frontend already sends batches)
     const results = {
       deleted: [] as any[],
       created: [] as any[],
       errors: [] as any[],
-      processed: 0,
-      total: codes.length,
     }
 
-    for (const coupon of batch) {
+    for (const coupon of codes) {
       const code = coupon.code || coupon.coupon_code || coupon
 
       if (typeof code !== 'string') {
         results.errors.push({ 
           code: JSON.stringify(coupon), 
           error: 'Invalid coupon data: code is not a string',
-          index: startIndex + batch.indexOf(coupon)
+          retryable: false
         })
         continue
       }
@@ -179,19 +177,14 @@ export async function POST(request: NextRequest) {
         results.errors.push({ 
           code, 
           error: errorMessage,
-          index: startIndex + batch.indexOf(coupon),
           retryable: !errorMessage.includes('already exists')
         })
       }
-      
-      results.processed++
     }
 
     return NextResponse.json({
       success: true,
       results,
-      hasMore: startIndex + batchSize < codes.length,
-      nextIndex: startIndex + batchSize,
     })
   } catch (error: any) {
     return NextResponse.json(

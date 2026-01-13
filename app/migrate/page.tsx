@@ -201,8 +201,6 @@ export default function MigratePage() {
             accessToken: creds.accessToken,
             channelId: creds.channelId,
             codes: batch,
-            startIndex: currentIndex,
-            batchSize: batchSize,
           }),
         })
 
