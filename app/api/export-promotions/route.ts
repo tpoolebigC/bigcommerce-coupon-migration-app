@@ -1,9 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 
-async function delay(ms: number) {
-  return new Promise(resolve => setTimeout(resolve, ms))
-}
-
 export async function POST(request: NextRequest) {
   try {
     const { storeHash, accessToken } = await request.json()
@@ -20,7 +16,7 @@ export async function POST(request: NextRequest) {
     let page = 1
     let hasMore = true
 
-    // Fetch all promotions
+    // Fetch all promotions (just metadata - fast)
     while (hasMore) {
       const response = await fetch(`${API_BASE}/promotions?page=${page}&limit=250`, {
         headers: {
@@ -44,43 +40,20 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Fetch coupon codes for each promotion (with rate limiting)
-    const exports = []
-    for (const promotion of promotions) {
-      if (promotion.redemption_type === 'COUPON') {
-        try {
-          await delay(250) // Rate limiting: 4 req/sec (safe for BigCommerce)
-          const codesResponse = await fetch(`${API_BASE}/promotions/${promotion.id}/codes`, {
-            headers: {
-              'X-Auth-Token': accessToken,
-              'Accept': 'application/json',
-            },
-          })
-
-          if (codesResponse.ok) {
-            const codesData = await codesResponse.json()
-            exports.push({
-              promotion: {
-                id: promotion.id,
-                name: promotion.name,
-                redemption_type: promotion.redemption_type,
-                status: promotion.status,
-                rules: promotion.rules || [],
-              },
-              codes: codesData.data || [],
-            })
-          }
-        } catch (error) {
-          // Skip promotions that can't fetch codes
-        }
-      }
-    }
+    // Filter to only coupon promotions
+    const couponPromotions = promotions.filter(p => p.redemption_type === 'COUPON')
 
     return NextResponse.json({
       success: true,
-      data: exports,
       totalPromotions: promotions.length,
-      totalCoupons: exports.reduce((sum, exp) => sum + exp.codes.length, 0),
+      totalCouponPromotions: couponPromotions.length,
+      promotions: couponPromotions.map(p => ({
+        id: p.id,
+        name: p.name,
+        redemption_type: p.redemption_type,
+        status: p.status,
+        rules: p.rules || [],
+      })),
     })
   } catch (error: any) {
     return NextResponse.json(

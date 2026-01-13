@@ -59,7 +59,10 @@ export default function MigratePage() {
 
     try {
       const creds = getCredentials()
-      const response = await fetch('/api/export', {
+      const batchSize = 50 // Process 50 promotions at a time (safe for timeouts)
+      
+      // Step 1: Get list of all promotions (fast - just metadata, won't timeout)
+      const listResponse = await fetch('/api/export-promotions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -68,15 +71,69 @@ export default function MigratePage() {
         }),
       })
 
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Export failed')
+      const listData = await listResponse.json()
+      if (!listResponse.ok) {
+        throw new Error(listData.error || 'Failed to get promotion list')
       }
 
-      setExportData(data)
+      const promotions = listData.promotions || []
+      const totalPromotions = promotions.length
+      setProgress(prev => ({ ...prev, total: totalPromotions }))
+
+      // Step 2: Process codes in batches (client-side batching to avoid timeouts)
+      const allExports: any[] = []
+      let currentIndex = 0
+
+      while (currentIndex < promotions.length) {
+        const batch = promotions.slice(currentIndex, currentIndex + batchSize)
+        const promotionIds = batch.map((p: any) => p.id)
+
+        setProgress(prev => ({
+          ...prev,
+          processed: currentIndex,
+          currentCode: `Batch ${Math.floor(currentIndex / batchSize) + 1}/${Math.ceil(totalPromotions / batchSize)}`
+        }))
+
+        const batchResponse = await fetch('/api/export-codes-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            storeHash: creds.storeHash,
+            accessToken: creds.accessToken,
+            promotionIds: promotionIds,
+          }),
+        })
+
+        const batchData = await batchResponse.json()
+        if (!batchResponse.ok) {
+          throw new Error(batchData.error || `Batch export failed at index ${currentIndex}`)
+        }
+
+        // Merge batch data with promotion info
+        batch.forEach((promotion: any, idx: number) => {
+          const codesData = batchData.data.find((d: any) => d.promotionId === promotion.id)
+          if (codesData) {
+            allExports.push({
+              promotion: promotion,
+              codes: codesData.codes,
+            })
+          }
+        })
+
+        currentIndex += batchSize
+      }
+
+      // Compile final export data
+      const exportData = {
+        success: true,
+        data: allExports,
+        totalPromotions: listData.totalPromotions,
+        totalCoupons: allExports.reduce((sum, exp) => sum + exp.codes.length, 0),
+      }
+
+      setExportData(exportData)
       const extractedCodes: Coupon[] = []
-      data.data.forEach((exp: any) => {
+      exportData.data.forEach((exp: any) => {
         exp.codes.forEach((code: any) => {
           extractedCodes.push({
             code: code.code,
@@ -88,6 +145,7 @@ export default function MigratePage() {
       })
       setCodes(extractedCodes)
       setStep(2)
+      setProgress(prev => ({ ...prev, processed: totalPromotions, currentCode: undefined }))
     } catch (err: any) {
       setError(err.message || 'Export failed')
     } finally {
@@ -344,6 +402,25 @@ export default function MigratePage() {
           <p style={{ marginBottom: '1.5rem' }}>
             First, let&apos;s create a backup of your existing coupons.
           </p>
+          
+          {loading && progress.total > 0 && (
+            <div className="progress-container" style={{ marginBottom: '1.5rem' }}>
+              <div className="progress-bar">
+                <div className="progress-fill" style={{ width: `${Math.round((progress.processed / progress.total) * 100)}%` }}>
+                  {Math.round((progress.processed / progress.total) * 100)}%
+                </div>
+              </div>
+              <div className="progress-text">
+                Processing: {progress.processed} of {progress.total} promotions
+              </div>
+              {progress.currentCode && (
+                <div style={{ textAlign: 'center', marginTop: '0.5rem', color: '#718096', fontSize: '0.875rem' }}>
+                  {progress.currentCode}
+                </div>
+              )}
+            </div>
+          )}
+
           <button onClick={handleExport} className="button" disabled={loading}>
             {loading && <span className="loading"></span>}
             {loading ? 'Exporting...' : 'Export Coupons'}
