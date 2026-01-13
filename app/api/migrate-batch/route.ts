@@ -25,20 +25,28 @@ async function apiRequest(
     options.body = JSON.stringify(body)
   }
 
-  await delay(250) // Rate limiting - 4 req/sec (safe limit for BigCommerce)
+  await delay(250) // Faster rate limiting (4 req/sec instead of 2)
 
-  const response = await fetch(url, options)
+  try {
+    const response = await fetch(url, options)
 
-  if (!response.ok) {
-    const errorText = await response.text()
-    throw new Error(`API Error (${response.status}): ${errorText}`)
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new Error(`API Error (${response.status}): ${errorText.substring(0, 200)}`)
+    }
+
+    if (response.status === 204) {
+      return null
+    }
+
+    return response.json()
+  } catch (error: any) {
+    // Re-throw with more context
+    if (error.message.includes('fetch failed')) {
+      throw new Error(`Network error: Connection failed. Check your internet connection.`)
+    }
+    throw error
   }
-
-  if (response.status === 204) {
-    return null
-  }
-
-  return response.json()
 }
 
 async function deletePromotion(storeHash: string, accessToken: string, promotionId: number) {
@@ -104,7 +112,7 @@ async function createStandardCoupon(
 
 export async function POST(request: NextRequest) {
   try {
-    const { storeHash, accessToken, channelId, codes } = await request.json()
+    const { storeHash, accessToken, channelId, codes, startIndex = 0, batchSize = 50 } = await request.json()
 
     if (!storeHash || !accessToken || !codes || !Array.isArray(codes)) {
       return NextResponse.json(
@@ -113,17 +121,24 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    const batch = codes.slice(startIndex, startIndex + batchSize)
     const results = {
       deleted: [] as any[],
       created: [] as any[],
       errors: [] as any[],
+      processed: 0,
+      total: codes.length,
     }
 
-    for (const coupon of codes) {
+    for (const coupon of batch) {
       const code = coupon.code || coupon.coupon_code || coupon
 
       if (typeof code !== 'string') {
-        results.errors.push({ code: JSON.stringify(coupon), error: 'Invalid coupon data' })
+        results.errors.push({ 
+          code: JSON.stringify(coupon), 
+          error: 'Invalid coupon data: code is not a string',
+          index: startIndex + batch.indexOf(coupon)
+        })
         continue
       }
 
@@ -133,7 +148,8 @@ export async function POST(request: NextRequest) {
             await deletePromotion(storeHash, accessToken, coupon.oldPromotionId)
             results.deleted.push({ code, promotionId: coupon.oldPromotionId })
           } catch (error: any) {
-            // Continue even if deletion fails
+            // Log but continue
+            console.warn(`Could not delete promotion ${coupon.oldPromotionId}:`, error.message)
           }
         }
 
@@ -146,13 +162,36 @@ export async function POST(request: NextRequest) {
 
         results.created.push(created)
       } catch (error: any) {
-        results.errors.push({ code, error: error.message })
+        // Enhanced error information
+        let errorMessage = error.message || 'Unknown error'
+        
+        // Provide actionable error messages
+        if (errorMessage.includes('422')) {
+          errorMessage = `Code already exists or invalid format: ${code}`
+        } else if (errorMessage.includes('429')) {
+          errorMessage = `Rate limit exceeded. Please wait and retry.`
+        } else if (errorMessage.includes('401') || errorMessage.includes('403')) {
+          errorMessage = `Authentication failed. Please check your API credentials.`
+        } else if (errorMessage.includes('Network error')) {
+          errorMessage = `Network connection failed. Check your internet and retry.`
+        }
+
+        results.errors.push({ 
+          code, 
+          error: errorMessage,
+          index: startIndex + batch.indexOf(coupon),
+          retryable: !errorMessage.includes('already exists')
+        })
       }
+      
+      results.processed++
     }
 
     return NextResponse.json({
       success: true,
       results,
+      hasMore: startIndex + batchSize < codes.length,
+      nextIndex: startIndex + batchSize,
     })
   } catch (error: any) {
     return NextResponse.json(
