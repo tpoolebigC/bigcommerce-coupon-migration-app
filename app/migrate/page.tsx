@@ -113,7 +113,7 @@ export default function MigratePage() {
           
           // Parse CSV rows (skip header)
           const typeIndex = headers.findIndex(h => h.toLowerCase() === 'type')
-          importedCodes = lines.slice(1).map((line, idx) => {
+          const parsedCodes = lines.slice(1).map((line, idx): Coupon | null => {
             // Handle quoted fields
             const fields: string[] = []
             let currentField = ''
@@ -165,7 +165,8 @@ export default function MigratePage() {
               name: nameIndex >= 0 ? fields[nameIndex]?.replace(/^"|"$/g, '') : undefined,
               max_uses,
             }
-          }).filter((code): code is Coupon => code !== null)
+          })
+          importedCodes = parsedCodes.filter((code): code is Coupon => code !== null)
           
           if (importedCodes.length === 0) {
             setError('No valid codes found in CSV file.')
