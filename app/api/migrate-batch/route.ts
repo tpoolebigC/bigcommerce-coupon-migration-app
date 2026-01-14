@@ -49,6 +49,30 @@ async function apiRequest(
   }
 }
 
+async function deleteLegacyCoupon(storeHash: string, accessToken: string, couponId: number) {
+  try {
+    await delay(250) // Rate limiting
+    const url = `https://api.bigcommerce.com/stores/${storeHash}/v2/coupons/${couponId}`
+    const response = await fetch(url, {
+      method: 'DELETE',
+      headers: {
+        'X-Auth-Token': accessToken,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!response.ok && response.status !== 404) {
+      const errorText = await response.text()
+      throw new Error(`API Error (${response.status}): ${errorText.substring(0, 200)}`)
+    }
+
+    return true
+  } catch (error: any) {
+    throw new Error(`Failed to delete legacy coupon ${couponId}: ${error.message}`)
+  }
+}
+
 async function deletePromotion(storeHash: string, accessToken: string, promotionId: number) {
   try {
     const codesResponse = await apiRequest(storeHash, accessToken, 'GET', `/promotions/${promotionId}/codes`)
@@ -75,12 +99,40 @@ async function createStandardCoupon(
   channelId: string,
   couponData: any
 ) {
-  const { code, discount = 10, name } = couponData
+  const { code, discount = 10, discountType = 'percentage', name } = couponData
 
-  const promotionData = {
-    name: name || `Coupon: ${code}`,
-    channels: [{ id: parseInt(channelId, 10) }],
-    rules: [
+  // Build promotion rules based on discount type
+  let rules: any[] = []
+
+  if (discountType === 'fixed') {
+    // Fixed dollar amount discount on cart value
+    rules = [
+      {
+        action: {
+          cart_value: {
+            discount: {
+              fixed_amount: discount,
+            },
+          },
+        },
+      },
+    ]
+  } else if (discountType === 'per_item') {
+    // Percentage discount on each item (cart_items)
+    rules = [
+      {
+        action: {
+          cart_items: {
+            discount: {
+              percentage_amount: discount,
+            },
+          },
+        },
+      },
+    ]
+  } else {
+    // Default: percentage discount on cart value
+    rules = [
       {
         action: {
           cart_value: {
@@ -90,7 +142,13 @@ async function createStandardCoupon(
           },
         },
       },
-    ],
+    ]
+  }
+
+  const promotionData = {
+    name: name || `Coupon: ${code}`,
+    channels: [{ id: parseInt(channelId, 10) }],
+    rules: rules,
     redemption_type: 'COUPON',
     status: 'ENABLED',
   }
@@ -141,10 +199,22 @@ export async function POST(request: NextRequest) {
       }
 
       try {
+        // Delete legacy coupon if oldCouponId is provided (V2 API)
+        if (coupon.oldCouponId) {
+          try {
+            await deleteLegacyCoupon(storeHash, accessToken, coupon.oldCouponId)
+            results.deleted.push({ code, couponId: coupon.oldCouponId, type: 'legacy' })
+          } catch (error: any) {
+            // Log but continue
+            console.warn(`Could not delete legacy coupon ${coupon.oldCouponId}:`, error.message)
+          }
+        }
+        
+        // Delete standard promotion if oldPromotionId is provided (V3 API)
         if (coupon.oldPromotionId) {
           try {
             await deletePromotion(storeHash, accessToken, coupon.oldPromotionId)
-            results.deleted.push({ code, promotionId: coupon.oldPromotionId })
+            results.deleted.push({ code, promotionId: coupon.oldPromotionId, type: 'standard' })
           } catch (error: any) {
             // Log but continue
             console.warn(`Could not delete promotion ${coupon.oldPromotionId}:`, error.message)
@@ -154,6 +224,7 @@ export async function POST(request: NextRequest) {
         const created = await createStandardCoupon(storeHash, accessToken, channelId || '1', {
           code: code,
           discount: coupon.discount || 10,
+          discountType: coupon.discountType || 'percentage',
           name: coupon.name,
           max_uses: coupon.max_uses,
         })

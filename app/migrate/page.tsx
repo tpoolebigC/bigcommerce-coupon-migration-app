@@ -6,7 +6,9 @@ import { useRouter } from 'next/navigation'
 interface Coupon {
   code: string
   discount?: number
+  discountType?: 'percentage' | 'fixed' | 'per_item'
   oldPromotionId?: number
+  oldCouponId?: number
   name?: string
   max_uses?: number
 }
@@ -84,30 +86,120 @@ export default function MigratePage() {
     reader.onload = (e) => {
       try {
         const content = e.target?.result as string
-        const importedCodes = JSON.parse(content)
+        const fileName = file.name.toLowerCase()
         
-        if (!Array.isArray(importedCodes)) {
-          setError('Invalid file format. Expected a JSON array of coupon codes.')
-          return
+        let importedCodes: Coupon[] = []
+        
+        if (fileName.endsWith('.csv')) {
+          // Parse CSV file
+          const lines = content.split('\n').filter(line => line.trim())
+          if (lines.length < 2) {
+            setError('CSV file must have a header row and at least one data row.')
+            return
+          }
+          
+          // Parse header
+          const headers = lines[0].split(',').map(h => h.trim())
+          const codeIndex = headers.findIndex(h => h.toLowerCase() === 'code')
+          const idIndex = headers.findIndex(h => h.toLowerCase().includes('coupon id') || h.toLowerCase().includes('id'))
+          const nameIndex = headers.findIndex(h => h.toLowerCase().includes('name'))
+          const discountIndex = headers.findIndex(h => h.toLowerCase() === 'discount')
+          const maxUsesIndex = headers.findIndex(h => h.toLowerCase().includes('max uses'))
+          
+          if (codeIndex === -1) {
+            setError('CSV file must have a "Code" column.')
+            return
+          }
+          
+          // Parse CSV rows (skip header)
+          const typeIndex = headers.findIndex(h => h.toLowerCase() === 'type')
+          importedCodes = lines.slice(1).map((line, idx) => {
+            // Handle quoted fields
+            const fields: string[] = []
+            let currentField = ''
+            let inQuotes = false
+            
+            for (let i = 0; i < line.length; i++) {
+              const char = line[i]
+              if (char === '"') {
+                if (inQuotes && line[i + 1] === '"') {
+                  currentField += '"'
+                  i++ // Skip next quote
+                } else {
+                  inQuotes = !inQuotes
+                }
+              } else if (char === ',' && !inQuotes) {
+                fields.push(currentField.trim())
+                currentField = ''
+              } else {
+                currentField += char
+              }
+            }
+            fields.push(currentField.trim()) // Add last field
+            
+            const code = fields[codeIndex]?.trim()
+            if (!code) return null
+            
+            const discountStr = fields[discountIndex] || '10'
+            const discount = parseFloat(discountStr) || 10
+            
+            // Parse discount type from Type column
+            const typeStr = typeIndex >= 0 ? fields[typeIndex]?.toLowerCase() : 'percentage_discount'
+            let discountType: 'percentage' | 'fixed' | 'per_item' = 'percentage'
+            if (typeStr?.includes('fixed')) {
+              discountType = 'fixed'
+            } else if (typeStr?.includes('per_item') || typeStr?.includes('per item')) {
+              discountType = 'per_item'
+            } else {
+              discountType = 'percentage'
+            }
+            
+            const maxUsesStr = fields[maxUsesIndex]?.trim().toLowerCase()
+            const max_uses = maxUsesStr === 'unlimited' || !maxUsesStr ? null : parseInt(maxUsesStr) || null
+            
+            return {
+              code,
+              discount,
+              discountType,
+              oldCouponId: idIndex >= 0 && fields[idIndex] ? parseInt(fields[idIndex]) : undefined,
+              name: nameIndex >= 0 ? fields[nameIndex]?.replace(/^"|"$/g, '') : undefined,
+              max_uses,
+            }
+          }).filter((code): code is Coupon => code !== null)
+          
+          if (importedCodes.length === 0) {
+            setError('No valid codes found in CSV file.')
+            return
+          }
+        } else {
+          // Parse JSON file
+          const parsed = JSON.parse(content)
+          
+          if (!Array.isArray(parsed)) {
+            setError('Invalid file format. Expected a JSON array of coupon codes.')
+            return
+          }
+
+          // Validate and transform codes
+          importedCodes = parsed.map((item: any) => ({
+            code: item.code || item.coupon_code || item,
+            discount: item.discount || 10,
+            discountType: item.discountType || item.discount_type || 'percentage',
+            oldCouponId: item.oldCouponId || item['Coupon ID'],
+            oldPromotionId: item.oldPromotionId,
+            name: item.name || item.promotion_name || item['Coupon Name'],
+            max_uses: item.max_uses === 'Unlimited' || item.max_uses === null || item.max_uses === undefined ? null : item.max_uses,
+          }))
         }
 
-        // Validate and transform codes
-        const codes: Coupon[] = importedCodes.map((item: any) => ({
-          code: item.code || item.coupon_code || item,
-          discount: item.discount || 10,
-          oldPromotionId: item.oldPromotionId,
-          name: item.name || item.promotion_name,
-          max_uses: item.max_uses,
-        }))
-
-        if (codes.length === 0) {
+        if (importedCodes.length === 0) {
           setError('No valid codes found in file.')
           return
         }
 
-        handleImportCodes(codes)
+        handleImportCodes(importedCodes)
       } catch (error: any) {
-        setError(`Error parsing JSON file: ${error.message}`)
+        setError(`Error parsing file: ${error.message}`)
       }
     }
     reader.readAsText(file)
@@ -129,6 +221,8 @@ export default function MigratePage() {
       const codes: Coupon[] = importedCodes.map((item: any) => ({
         code: item.code || item.coupon_code || item,
         discount: item.discount || 10,
+        discountType: item.discountType || item.discount_type || 'percentage',
+        oldCouponId: item.oldCouponId,
         oldPromotionId: item.oldPromotionId,
         name: item.name || item.promotion_name,
         max_uses: item.max_uses,
@@ -152,10 +246,9 @@ export default function MigratePage() {
 
     try {
       const creds = getCredentials()
-      const batchSize = 50 // Process 50 promotions at a time (safe for timeouts)
       
-      // Step 1: Get list of all promotions (fast - just metadata, won't timeout)
-      const listResponse = await fetch('/api/export-promotions', {
+      // Export legacy coupons from V2 API
+      const response = await fetch('/api/export-legacy-coupons', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -164,81 +257,65 @@ export default function MigratePage() {
         }),
       })
 
-      const listData = await listResponse.json()
-      if (!listResponse.ok) {
-        throw new Error(listData.error || 'Failed to get promotion list')
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to export legacy coupons')
       }
 
-      const promotions = listData.promotions || []
-      const totalPromotions = promotions.length
-      setProgress(prev => ({ ...prev, total: totalPromotions }))
+      const coupons = data.coupons || []
+      const totalCoupons = coupons.length
+      
+      setProgress(prev => ({ ...prev, total: totalCoupons, processed: totalCoupons }))
 
-      // Step 2: Process codes in batches (client-side batching to avoid timeouts)
-      const allExports: any[] = []
-      let currentIndex = 0
-
-      while (currentIndex < promotions.length) {
-        const batch = promotions.slice(currentIndex, currentIndex + batchSize)
-        const promotionIds = batch.map((p: any) => p.id)
-
-        setProgress(prev => ({
-          ...prev,
-          processed: currentIndex,
-          currentCode: `Batch ${Math.floor(currentIndex / batchSize) + 1}/${Math.ceil(totalPromotions / batchSize)}`
-        }))
-
-        const batchResponse = await fetch('/api/export-codes-batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            storeHash: creds.storeHash,
-            accessToken: creds.accessToken,
-            promotionIds: promotionIds,
-          }),
-        })
-
-        const batchData = await batchResponse.json()
-        if (!batchResponse.ok) {
-          throw new Error(batchData.error || `Batch export failed at index ${currentIndex}`)
+      // Map legacy coupon structure to our Coupon interface
+      const extractedCodes: Coupon[] = coupons.map((coupon: any) => {
+        // Extract discount from legacy coupon structure
+        // V2 coupons have: type (percentage_discount/fixed_discount/per_item_discount) and amount
+        let discount = 10 // default
+        let discountType: 'percentage' | 'fixed' | 'per_item' = 'percentage'
+        
+        if (coupon.type === 'percentage_discount' || coupon.type === 'percentage') {
+          discountType = 'percentage'
+          discount = coupon.amount ? parseFloat(coupon.amount) : 10
+        } else if (coupon.type === 'fixed_discount' || coupon.type === 'fixed') {
+          discountType = 'fixed'
+          discount = coupon.amount ? parseFloat(coupon.amount) : 10
+        } else if (coupon.type === 'per_item_discount') {
+          discountType = 'per_item'
+          discount = coupon.amount ? parseFloat(coupon.amount) : 10
+        } else if (coupon.amount) {
+          // Default to percentage if type is unknown but amount exists
+          discount = parseFloat(coupon.amount)
         }
 
-        // Merge batch data with promotion info
-        batch.forEach((promotion: any, idx: number) => {
-          const codesData = batchData.data.find((d: any) => d.promotionId === promotion.id)
-          if (codesData) {
-            allExports.push({
-              promotion: promotion,
-              codes: codesData.codes,
-            })
-          }
-        })
+        return {
+          code: coupon.code,
+          discount: discount,
+          discountType: discountType,
+          oldCouponId: coupon.id,
+          name: coupon.name,
+          max_uses: coupon.max_uses || null,
+        }
+      })
 
-        currentIndex += batchSize
-      }
-
-      // Compile final export data
+      // Create export data structure for compatibility with CSV/JSON download
       const exportData = {
         success: true,
-        data: allExports,
-        totalPromotions: listData.totalPromotions,
-        totalCoupons: allExports.reduce((sum, exp) => sum + exp.codes.length, 0),
+        data: coupons.map((coupon: any) => ({
+          coupon: coupon,
+          codes: [{
+            code: coupon.code,
+            discount: coupon.type === 'percentage' ? `${coupon.amount}%` : `$${coupon.amount}`,
+          }],
+        })),
+        totalCoupons: totalCoupons,
+        totalPromotions: totalCoupons, // For compatibility
       }
 
       setExportData(exportData)
-      const extractedCodes: Coupon[] = []
-      exportData.data.forEach((exp: any) => {
-        exp.codes.forEach((code: any) => {
-          extractedCodes.push({
-            code: code.code,
-            discount: 10,
-            oldPromotionId: exp.promotion.id,
-            name: exp.promotion.name,
-          })
-        })
-      })
       setCodes(extractedCodes)
       setStep(2)
-      setProgress(prev => ({ ...prev, processed: totalPromotions, currentCode: undefined }))
+      setProgress(prev => ({ ...prev, currentCode: undefined }))
     } catch (err: any) {
       setError(err.message || 'Export failed')
     } finally {
@@ -252,7 +329,7 @@ export default function MigratePage() {
       return
     }
 
-    if (!confirm(`This will delete ${codes.length} old promotions and create new ones. Continue?`)) {
+    if (!confirm(`This will delete ${codes.length} legacy coupon codes and create new standard promotions. Continue?`)) {
       return
     }
 
@@ -333,10 +410,20 @@ export default function MigratePage() {
   }
 
   const downloadExportJSON = () => {
-    if (!exportData || !exportData.data) return
+    if (!codes || codes.length === 0) return
     
     try {
-      const blob = new Blob([JSON.stringify(exportData.data, null, 2)], { type: 'application/json' })
+      // Export in the format expected by the import (array of coupon objects)
+      const exportFormat = codes.map(coupon => ({
+        code: coupon.code,
+        discount: coupon.discount || 10,
+        discountType: coupon.discountType || 'percentage',
+        oldCouponId: coupon.oldCouponId,
+        name: coupon.name,
+        max_uses: coupon.max_uses,
+      }))
+      
+      const blob = new Blob([JSON.stringify(exportFormat, null, 2)], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -355,39 +442,34 @@ export default function MigratePage() {
     if (!exportData || !exportData.data) return
     
     try {
-      const getDiscount = (rules: any[]) => {
-        if (!rules || rules.length === 0) return 'N/A'
-        const rule = rules[0]
-        if (rule.action?.cart_value?.discount?.percentage_amount) {
-          return `${rule.action.cart_value.discount.percentage_amount}%`
-        }
-        if (rule.action?.cart_value?.discount?.fixed_amount) {
-          return `$${rule.action.cart_value.discount.fixed_amount}`
-        }
-        if (rule.action?.cart_items?.discount?.percentage_amount) {
-          return `${rule.action.cart_items.discount.percentage_amount}% (items)`
-        }
-        return 'Custom'
-      }
+      const csvRows = ['Code,Coupon ID,Coupon Name,Discount,Type,Enabled,Max Uses,Current Uses,Min Purchase,Expires']
       
-      const csvRows = ['Code,Promotion ID,Promotion Name,Discount,Status,Max Uses,Current Uses']
-      
-      exportData.data.forEach((exp: any) => {
-        if (exp.codes && exp.codes.length > 0) {
-          exp.codes.forEach((code: any) => {
-            const discount = getDiscount(exp.promotion.rules || [])
-            const maxUses = code.max_uses === 0 || code.max_uses === null ? 'Unlimited' : code.max_uses
-            const row = [
-              code.code || '',
-              exp.promotion.id || '',
-              `"${(exp.promotion.name || '').replace(/"/g, '""')}"`,
-              discount,
-              exp.promotion.status || '',
-              maxUses,
-              code.current_uses || 0
-            ]
-            csvRows.push(row.join(','))
-          })
+      exportData.data.forEach((item: any) => {
+        const coupon = item.coupon || item
+        if (coupon.code) {
+          const discount = coupon.type === 'percentage' 
+            ? `${coupon.amount}%` 
+            : coupon.type === 'fixed' 
+            ? `$${coupon.amount}`
+            : coupon.amount || 'N/A'
+          const maxUses = coupon.max_uses === 0 || coupon.max_uses === null ? 'Unlimited' : coupon.max_uses
+          const enabled = coupon.enabled ? 'Yes' : 'No'
+          const expires = coupon.expires || 'N/A'
+          const minPurchase = coupon.min_purchase ? `$${coupon.min_purchase}` : 'N/A'
+          
+          const row = [
+            coupon.code || '',
+            coupon.id || '',
+            `"${(coupon.name || '').replace(/"/g, '""')}"`,
+            discount,
+            coupon.type || '',
+            enabled,
+            maxUses,
+            coupon.num_uses || 0,
+            minPurchase,
+            expires
+          ]
+          csvRows.push(row.join(','))
         }
       })
       
@@ -492,9 +574,9 @@ export default function MigratePage() {
           <h2>Step 1: Export or Import Coupons</h2>
           
           <div style={{ marginBottom: '2rem', padding: '1rem', backgroundColor: '#f7fafc', borderRadius: '8px' }}>
-            <h3 style={{ marginTop: 0, marginBottom: '1rem' }}>Option 1: Export from BigCommerce</h3>
+            <h3 style={{ marginTop: 0, marginBottom: '1rem' }}>Option 1: Export Legacy Coupons from BigCommerce</h3>
             <p style={{ marginBottom: '1rem', color: '#4a5568' }}>
-              Export your current coupons from BigCommerce to create a backup before migration.
+              Export your legacy coupon codes from the "Coupon codes" section in BigCommerce to create a backup before migration.
             </p>
             
             {loading && progress.total > 0 && (
@@ -505,7 +587,7 @@ export default function MigratePage() {
                   </div>
                 </div>
                 <div className="progress-text">
-                  Processing: {progress.processed} of {progress.total} promotions
+                  Processing: {progress.processed} of {progress.total} coupons
                 </div>
                 {progress.currentCode && (
                   <div style={{ textAlign: 'center', marginTop: '0.5rem', color: '#718096', fontSize: '0.875rem' }}>
@@ -517,7 +599,7 @@ export default function MigratePage() {
 
             <button onClick={handleExport} className="button" disabled={loading}>
               {loading && <span className="loading"></span>}
-              {loading ? 'Exporting...' : 'Export Coupons from BigCommerce'}
+              {loading ? 'Exporting...' : 'Export Legacy Coupons from BigCommerce'}
             </button>
           </div>
 
@@ -529,10 +611,10 @@ export default function MigratePage() {
             
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
               <label className="button button-secondary" style={{ cursor: 'pointer', margin: 0 }}>
-                📁 Upload JSON File
+                📁 Upload File (CSV or JSON)
                 <input
                   type="file"
-                  accept=".json,application/json"
+                  accept=".json,.csv,application/json,text/csv"
                   onChange={handleFileUpload}
                   style={{ display: 'none' }}
                 />
@@ -544,18 +626,26 @@ export default function MigratePage() {
             </div>
             
             <div style={{ marginTop: '1rem', fontSize: '0.875rem', color: '#718096' }}>
-              <strong>Expected JSON format:</strong>
-              <pre style={{ marginTop: '0.5rem', padding: '0.75rem', backgroundColor: '#edf2f7', borderRadius: '4px', overflow: 'auto', fontSize: '0.75rem' }}>
+              <strong>Supported formats:</strong>
+              <div style={{ marginTop: '0.5rem' }}>
+                <strong>CSV:</strong> Code, Coupon ID, Coupon Name, Discount, Type, Enabled, Max Uses, Current Uses, Min Purchase, Expires
+              </div>
+              <div style={{ marginTop: '0.5rem' }}>
+                <strong>JSON:</strong>
+                <pre style={{ marginTop: '0.5rem', padding: '0.75rem', backgroundColor: '#edf2f7', borderRadius: '4px', overflow: 'auto', fontSize: '0.75rem' }}>
 {`[
   {
     "code": "COUPON1",
     "discount": 10,
-    "oldPromotionId": 123,
-    "name": "Promotion Name"
+    "discountType": "percentage",
+    "oldCouponId": 123,
+    "name": "Coupon Name",
+    "max_uses": null
   },
   ...
 ]`}
-              </pre>
+                </pre>
+              </div>
             </div>
           </div>
         </div>
@@ -566,7 +656,7 @@ export default function MigratePage() {
           <h2>Step 2: Review Your Coupons</h2>
           {exportData && (
             <div className="alert alert-success">
-              ✅ {exportData.totalCoupons ? `Exported ${exportData.totalCoupons} coupon codes from ${exportData.totalPromotions} promotions` : `Ready to migrate ${codes.length} coupon codes`}
+              ✅ {exportData.totalCoupons ? `Exported ${exportData.totalCoupons} legacy coupon codes` : `Ready to migrate ${codes.length} coupon codes`}
             </div>
           )}
           {exportData && exportData.data && (
