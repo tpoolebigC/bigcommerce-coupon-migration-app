@@ -155,7 +155,7 @@ export default function MigratePage() {
             }
             
             const maxUsesStr = fields[maxUsesIndex]?.trim().toLowerCase()
-            const max_uses = maxUsesStr === 'unlimited' || !maxUsesStr ? null : parseInt(maxUsesStr) || null
+            const max_uses = maxUsesStr === 'unlimited' || !maxUsesStr ? undefined : (parseInt(maxUsesStr) || undefined)
             
             return {
               code,
