@@ -29,6 +29,8 @@ export default function MigratePage() {
   const [error, setError] = useState('')
   const [exportData, setExportData] = useState<any>(null)
   const [codes, setCodes] = useState<Coupon[]>([])
+  const [selectedCoupons, setSelectedCoupons] = useState<Set<number>>(new Set())
+  const [searchQuery, setSearchQuery] = useState('')
   const [results, setResults] = useState<any>(null)
   const [progress, setProgress] = useState<ProgressState>({
     processed: 0,
@@ -57,6 +59,9 @@ export default function MigratePage() {
   const handleImportCodes = (importedCodes: Coupon[]) => {
     setError('')
     setCodes(importedCodes)
+    setSearchQuery('') // Clear search when importing new codes
+    // Select all coupons by default
+    setSelectedCoupons(new Set(importedCodes.map((_, idx) => idx)))
     
     // Create mock export data for compatibility
     setExportData({
@@ -315,6 +320,9 @@ export default function MigratePage() {
 
       setExportData(exportData)
       setCodes(extractedCodes)
+      setSearchQuery('') // Clear search when exporting new codes
+      // Select all coupons by default
+      setSelectedCoupons(new Set(extractedCodes.map((_, idx) => idx)))
       setStep(2)
       setProgress(prev => ({ ...prev, currentCode: undefined }))
     } catch (err: any) {
@@ -325,12 +333,15 @@ export default function MigratePage() {
   }
 
   const handleMigrate = async () => {
-    if (codes.length === 0) {
-      setError('No codes to migrate')
+    // Filter to only selected coupons
+    const selectedCodes = codes.filter((_, idx) => selectedCoupons.has(idx))
+    
+    if (selectedCodes.length === 0) {
+      setError('Please select at least one coupon to migrate')
       return
     }
 
-    if (!confirm(`This will delete ${codes.length} legacy coupon codes and create new standard promotions. Continue?`)) {
+    if (!confirm(`This will delete ${selectedCodes.length} legacy coupon codes and create new standard promotions. Continue?`)) {
       return
     }
 
@@ -349,15 +360,15 @@ export default function MigratePage() {
 
     setProgress({
       processed: 0,
-      total: codes.length,
+      total: selectedCodes.length,
       created: 0,
       deleted: 0,
       errors: 0
     })
 
     try {
-      while (currentIndex < codes.length) {
-        const batch = codes.slice(currentIndex, currentIndex + batchSize)
+      while (currentIndex < selectedCodes.length) {
+        const batch = selectedCodes.slice(currentIndex, currentIndex + batchSize)
         
         setProgress(prev => ({
           ...prev,
@@ -389,7 +400,7 @@ export default function MigratePage() {
         // Update progress
         setProgress(prev => ({
           processed: currentIndex + batch.length,
-          total: codes.length,
+          total: selectedCodes.length,
           created: finalResults.created.length,
           deleted: finalResults.deleted.length,
           errors: finalResults.errors.length,
@@ -541,6 +552,23 @@ export default function MigratePage() {
 
   const progressPercent = progress.total > 0 ? Math.round((progress.processed / progress.total) * 100) : 0
 
+  // Filter codes based on search query
+  const filteredCodes = codes.filter(coupon => {
+    if (!searchQuery.trim()) return true
+    const query = searchQuery.toLowerCase()
+    return (
+      coupon.code.toLowerCase().includes(query) ||
+      (coupon.name && coupon.name.toLowerCase().includes(query)) ||
+      coupon.discount?.toString().includes(query)
+    )
+  })
+
+  // Get selected count from filtered codes
+  const filteredSelectedCount = filteredCodes.filter((_, idx) => {
+    const originalIdx = codes.indexOf(filteredCodes[idx])
+    return selectedCoupons.has(originalIdx)
+  }).length
+
   return (
     <div className="container">
       <h1>Migrate Coupons</h1>
@@ -608,6 +636,7 @@ export default function MigratePage() {
             <h3 style={{ marginTop: 0, marginBottom: '1rem' }}>Option 2: Import Codes (Skip Export)</h3>
             <p style={{ marginBottom: '1rem', color: '#4a5568' }}>
               If you already have your codes exported or want to import from a file, you can skip the export step.
+              <strong> You can download the CSV, edit it (delete unwanted rows), and re-upload it!</strong>
             </p>
             
             <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
@@ -661,45 +690,230 @@ export default function MigratePage() {
             </div>
           )}
           {exportData && exportData.data && (
-            <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
+            <div style={{ marginBottom: '1.5rem', display: 'flex', gap: '1rem', flexWrap: 'wrap', alignItems: 'center' }}>
               <button onClick={downloadExportCSV} className="button button-secondary">
-                📊 Download CSV (Excel)
+                📊 Download CSV (Edit & Re-upload)
               </button>
               <button onClick={downloadExportJSON} className="button button-secondary">
                 📄 Download JSON (Backup)
               </button>
+              <label className="button button-secondary" style={{ cursor: 'pointer', margin: 0 }}>
+                📁 Re-upload Edited CSV/JSON
+                <input
+                  type="file"
+                  accept=".json,.csv,application/json,text/csv"
+                  onChange={handleFileUpload}
+                  style={{ display: 'none' }}
+                />
+              </label>
+            </div>
+          )}
+          
+          {!exportData && (
+            <div style={{ marginBottom: '1.5rem', padding: '1rem', backgroundColor: '#fffbf0', borderRadius: '8px', border: '1px solid #f6ad55' }}>
+              <p style={{ margin: 0, color: '#744210' }}>
+                💡 <strong>Tip:</strong> You can upload a CSV or JSON file directly to use as your migration list. 
+                Edit it in Excel/Sheets, then re-upload it here!
+              </p>
+              <div style={{ marginTop: '0.75rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <label className="button button-secondary" style={{ cursor: 'pointer', margin: 0 }}>
+                  📁 Upload CSV/JSON File
+                  <input
+                    type="file"
+                    accept=".json,.csv,application/json,text/csv"
+                    onChange={handleFileUpload}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+              </div>
             </div>
           )}
 
-          <h3>Coupons to Migrate ({codes.length})</h3>
-          <div style={{ maxHeight: '400px', overflowY: 'auto', marginBottom: '1.5rem' }}>
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Code</th>
-                  <th>Discount</th>
-                  <th>Name</th>
-                </tr>
-              </thead>
-              <tbody>
-                {codes.map((coupon, idx) => (
-                  <tr key={idx}>
-                    <td><strong>{coupon.code}</strong></td>
-                    <td>{coupon.discount}%</td>
-                    <td>{coupon.name || '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div style={{ marginBottom: '1.5rem' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+              <h3>Coupons to Migrate ({selectedCoupons.size} of {codes.length} selected{searchQuery && ` • ${filteredCodes.length} shown`})</h3>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button
+                  onClick={() => {
+                    const newSelected = new Set(selectedCoupons)
+                    filteredCodes.forEach((_, idx) => {
+                      const originalIdx = codes.indexOf(filteredCodes[idx])
+                      newSelected.add(originalIdx)
+                    })
+                    setSelectedCoupons(newSelected)
+                  }}
+                  className="button button-secondary"
+                  style={{ fontSize: '0.875rem', padding: '0.5rem 1rem' }}
+                >
+                  Select All {searchQuery ? 'Filtered' : ''}
+                </button>
+                <button
+                  onClick={() => {
+                    const newSelected = new Set(selectedCoupons)
+                    filteredCodes.forEach((_, idx) => {
+                      const originalIdx = codes.indexOf(filteredCodes[idx])
+                      newSelected.delete(originalIdx)
+                    })
+                    setSelectedCoupons(newSelected)
+                  }}
+                  className="button button-secondary"
+                  style={{ fontSize: '0.875rem', padding: '0.5rem 1rem' }}
+                >
+                  Deselect All {searchQuery ? 'Filtered' : ''}
+                </button>
+                <button
+                  onClick={() => setSelectedCoupons(new Set(codes.map((_, idx) => idx)))}
+                  className="button button-secondary"
+                  style={{ fontSize: '0.875rem', padding: '0.5rem 1rem' }}
+                >
+                  Select All
+                </button>
+                <button
+                  onClick={() => setSelectedCoupons(new Set())}
+                  className="button button-secondary"
+                  style={{ fontSize: '0.875rem', padding: '0.5rem 1rem' }}
+                >
+                  Deselect All
+                </button>
+              </div>
+            </div>
+            
+            {/* Search input */}
+            <div style={{ position: 'relative', marginBottom: '1rem' }}>
+              <input
+                type="text"
+                placeholder="🔍 Search by code, name, or discount..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '0.75rem 1rem',
+                  paddingLeft: '2.5rem',
+                  fontSize: '1rem',
+                  border: '1px solid #e2e8f0',
+                  borderRadius: '8px',
+                  outline: 'none',
+                  transition: 'border-color 0.2s',
+                }}
+                onFocus={(e) => e.target.style.borderColor = '#4299e1'}
+                onBlur={(e) => e.target.style.borderColor = '#e2e8f0'}
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  style={{
+                    position: 'absolute',
+                    right: '0.75rem',
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '1.2rem',
+                    color: '#718096',
+                    padding: '0.25rem',
+                  }}
+                  title="Clear search"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           </div>
+          {filteredCodes.length === 0 && searchQuery ? (
+            <div style={{ 
+              padding: '2rem', 
+              textAlign: 'center', 
+              color: '#718096',
+              backgroundColor: '#f7fafc',
+              borderRadius: '8px',
+              marginBottom: '1.5rem'
+            }}>
+              No coupons match "{searchQuery}". Try a different search term.
+            </div>
+          ) : (
+            <div style={{ maxHeight: '400px', overflowY: 'auto', marginBottom: '1.5rem' }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th style={{ width: '50px' }}>
+                      <input
+                        type="checkbox"
+                        checked={filteredSelectedCount === filteredCodes.length && filteredCodes.length > 0}
+                        onChange={(e) => {
+                          const newSelected = new Set(selectedCoupons)
+                          filteredCodes.forEach((_, idx) => {
+                            const originalIdx = codes.indexOf(filteredCodes[idx])
+                            if (e.target.checked) {
+                              newSelected.add(originalIdx)
+                            } else {
+                              newSelected.delete(originalIdx)
+                            }
+                          })
+                          setSelectedCoupons(newSelected)
+                        }}
+                        style={{ cursor: 'pointer' }}
+                      />
+                    </th>
+                    <th>Code</th>
+                    <th>Discount</th>
+                    <th>Type</th>
+                    <th>Name</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredCodes.map((coupon, filteredIdx) => {
+                    const originalIdx = codes.indexOf(coupon)
+                    return (
+                      <tr key={originalIdx} style={{ backgroundColor: selectedCoupons.has(originalIdx) ? '#f0f9ff' : 'transparent' }}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={selectedCoupons.has(originalIdx)}
+                            onChange={(e) => {
+                              const newSelected = new Set(selectedCoupons)
+                              if (e.target.checked) {
+                                newSelected.add(originalIdx)
+                              } else {
+                                newSelected.delete(originalIdx)
+                              }
+                              setSelectedCoupons(newSelected)
+                            }}
+                            style={{ cursor: 'pointer' }}
+                          />
+                        </td>
+                        <td><strong>{coupon.code}</strong></td>
+                        <td>
+                          {coupon.discountType === 'fixed' 
+                            ? `$${coupon.discount || 0}` 
+                            : `${coupon.discount || 0}%`}
+                        </td>
+                        <td>
+                          <span style={{ 
+                            padding: '0.25rem 0.5rem', 
+                            borderRadius: '4px', 
+                            fontSize: '0.75rem',
+                            backgroundColor: coupon.discountType === 'fixed' ? '#fed7aa' : coupon.discountType === 'per_item' ? '#ddd6fe' : '#bbf7d0'
+                          }}>
+                            {coupon.discountType || 'percentage'}
+                          </span>
+                        </td>
+                        <td>{coupon.name || '-'}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           <button
             onClick={handleMigrate}
             className="button"
-            disabled={loading || codes.length === 0}
+            disabled={loading || selectedCoupons.size === 0}
           >
             {loading && <span className="loading"></span>}
-            {loading ? 'Migrating...' : `Migrate ${codes.length} Coupons`}
+            {loading ? 'Migrating...' : `Migrate ${selectedCoupons.size} Selected Coupon${selectedCoupons.size !== 1 ? 's' : ''}`}
           </button>
         </div>
       )}
@@ -730,7 +944,7 @@ export default function MigratePage() {
           </div>
 
           <p style={{ marginTop: '1.5rem', color: '#718096' }}>
-            Processing at ~4 requests/second. Estimated time: {Math.ceil((progress.total - progress.processed) / 4)} seconds remaining
+            Processing in parallel (~5 coupons at a time). Estimated time: {Math.ceil((progress.total - progress.processed) / 5)} seconds remaining
           </p>
         </div>
       )}
@@ -812,6 +1026,7 @@ export default function MigratePage() {
                 setStep(1)
                 setExportData(null)
                 setCodes([])
+                setSelectedCoupons(new Set())
                 setResults(null)
                 setProgress({ processed: 0, total: 0, created: 0, deleted: 0, errors: 0 })
               }}
