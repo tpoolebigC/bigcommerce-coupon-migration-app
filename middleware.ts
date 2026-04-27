@@ -1,3 +1,5 @@
+import { NextResponse } from 'next/server';
+
 export const config = {
   matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)'],
 };
@@ -13,16 +15,17 @@ export default function middleware(request: Request) {
     })
   );
 
-  if (cookies['hive-auth'] === 'authenticated') return;
+  if (cookies['hive-auth'] === 'authenticated') return NextResponse.next();
 
   if (url.searchParams.get('password') === 'hive2026') {
-    return new Response(null, {
-      status: 302,
-      headers: {
-        Location: url.pathname,
-        'Set-Cookie': 'hive-auth=authenticated; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800',
-      },
+    const response = NextResponse.redirect(new URL(url.pathname, url.origin));
+    response.cookies.set('hive-auth', 'authenticated', {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'lax',
+      maxAge: 604800,
     });
+    return response;
   }
 
   const html = `<!DOCTYPE html><html><head>
@@ -43,7 +46,7 @@ button{padding:.7rem 1.5rem;border-radius:8px;border:none;background:hsl(235,80%
 <form method="GET"><input type="password" name="password" placeholder="Enter password" autofocus/>
 <button type="submit">Enter</button></form></div></body></html>`;
 
-  return new Response(html, {
+  return new NextResponse(html, {
     status: 200,
     headers: { 'Content-Type': 'text/html' },
   });
